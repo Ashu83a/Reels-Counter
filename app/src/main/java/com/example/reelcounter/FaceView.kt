@@ -8,19 +8,22 @@ import android.graphics.RectF
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.random.Random
 
-// A yellow face with big eyes. It floats along the pill, bobs, taps, waits,
-// glances at the user and blinks at uneven, natural intervals.
-class FaceView(context: Context) : View(context) {
+// A small yellow character: big eyes behind round glasses, little legs and arms.
+// It strolls along the pill, waves, taps its foot, glances at the user and blinks
+// at uneven, natural intervals. headPx is the width of the head in pixels.
+class FaceView(context: Context, private val headPx: Int) : View(context) {
 
     private companion object {
         const val STATE_WALK = 0
         const val STATE_TAP = 1
         const val STATE_WAIT = 2
+        const val STATE_WAVE = 3
         val TWO_PI = (2.0 * PI).toFloat()
         val ONE_PI = PI.toFloat()
     }
@@ -54,9 +57,32 @@ class FaceView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
     }
+    private val glassesPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF3A2A12.toInt()
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
     private val tearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF7FC4F2.toInt()
         style = Paint.Style.FILL
+    }
+    private val limbOutline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF5A3E0A.toInt()
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val limbFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFF7C948.toInt()
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val blobFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFF7C948.toInt()
+        style = Paint.Style.FILL
+    }
+    private val blobRim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF5A3E0A.toInt()
+        style = Paint.Style.STROKE
     }
     private val tmpRect = RectF()
     private val tmpPath = Path()
@@ -73,10 +99,17 @@ class FaceView(context: Context) : View(context) {
     private var posX = 0f
     private var phase = 0f
 
+    // Smoothly eased pose values
     private var mouth = 1f
     private var brow = 0f
     private var eyeOpen = 1f
     private var tear = 0f
+    private var turn = 0f
+    private var swing = 0f
+    private var wave = 0f
+    private var cheer = 0f
+    private var sit = 0f
+    private var bobPx = 0f
 
     private var lookX = 0f
     private var lookY = 0.3f
@@ -89,6 +122,9 @@ class FaceView(context: Context) : View(context) {
     private var blink = 0f
 
     private var hopT = -1f
+
+    private val handX = FloatArray(2)
+    private val handY = FloatArray(2)
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -104,19 +140,23 @@ class FaceView(context: Context) : View(context) {
         }
     }
 
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension((headPx * 1.7f).toInt(), (headPx * 1.375f).toInt())
+    }
+
     // 0 happy, 1 worried, 2 sad, 3 crying
     fun setMood(m: Int) {
         mood = m.coerceIn(0, 3)
     }
 
-    // How far the face may float in pixels (the pill width minus the face width).
+    // How far the character may stroll in pixels (the pill width minus the head width).
     fun setTravel(px: Float) {
         travel = max(0f, px)
         if (posX > travel / 2f) posX = travel / 2f
         if (posX < -travel / 2f) posX = -travel / 2f
     }
 
-    // One quick happy hop, used on milestones.
+    // One quick happy hop with both arms up, used on milestones.
     fun celebrate() {
         hopT = 0f
     }
@@ -157,10 +197,12 @@ class FaceView(context: Context) : View(context) {
             return
         }
         val roll = Random.nextFloat()
-        if (roll < 0.62f) {
+        if (roll < 0.55f) {
             startState(STATE_WALK, rand(2.5f, 5f))
-        } else if (roll < 0.82f) {
+        } else if (roll < 0.70f) {
             startState(STATE_TAP, rand(1f, 1.8f))
+        } else if (roll < 0.85f && mood <= 1) {
+            startState(STATE_WAVE, rand(1.2f, 2f))
         } else {
             startState(STATE_WAIT, rand(1f, 2.2f))
         }
@@ -168,6 +210,7 @@ class FaceView(context: Context) : View(context) {
 
     private fun step(dt: Float) {
         t += dt
+        val r = headPx / 2f
 
         val sf = when (mood) {
             0 -> 1f
@@ -182,7 +225,7 @@ class FaceView(context: Context) : View(context) {
             else -> 0f
         }
 
-        // Face expression eases smoothly towards the mood.
+        // Expression and pose ease smoothly towards their targets.
         val tMouth = when (mood) {
             0 -> 1f
             1 -> 0f
@@ -208,7 +251,14 @@ class FaceView(context: Context) : View(context) {
         eyeOpen += (tEye - eyeOpen) * k
         tear += (tTear - tear) * k
 
-        // Movement: walk, tap or wait.
+        val k2 = min(1f, dt * 6f)
+        turn += ((if (state == STATE_WALK) dir * 0.12f else 0f) - turn) * k2
+        swing += ((if (state == STATE_WALK) sf else 0f) - swing) * k2
+        wave += ((if (state == STATE_WAVE) 1f else 0f) - wave) * k2
+        cheer += ((if (hopT >= 0f) 1f else 0f) - cheer) * k2
+        sit += ((if (mood == 3) 1f else 0f) - sit) * k2
+
+        // Movement: walk, tap, wave or wait.
         var bounce = 0f
         var tilt = 0f
         stateLeft -= dt
@@ -230,15 +280,19 @@ class FaceView(context: Context) : View(context) {
                     } else if (stateLeft <= 0f) {
                         pickNext()
                     }
-                    phase += dt * TWO_PI * 2.6f * sf
-                    bounce = abs(sin(phase)) * 0.14f * hf
-                    tilt = dir * 7f * sin(phase) * hf
+                    phase += dt * TWO_PI * 2.2f * sf
+                    bounce = abs(sin(phase)) * 0.12f * hf
+                    tilt = dir * 6f * sin(phase) * hf
                 }
             }
             STATE_TAP -> {
                 phase += dt * TWO_PI * 3.4f
-                bounce = abs(sin(phase)) * 0.1f * max(hf, 0.5f)
-                tilt = sin(phase) * 2.5f
+                bounce = abs(sin(phase)) * 0.05f
+                tilt = sin(phase) * 2f
+                if (stateLeft <= 0f) pickNext()
+            }
+            STATE_WAVE -> {
+                tilt = sin(t * 2f) * 1.5f
                 if (stateLeft <= 0f) pickNext()
             }
             else -> {
@@ -248,15 +302,23 @@ class FaceView(context: Context) : View(context) {
             }
         }
 
-        // Glancing: mostly at the user, sometimes sideways.
+        // Glancing: mostly ahead while walking, mostly at the user when standing.
         lookTimer -= dt
         if (lookTimer <= 0f) {
             lookTimer = rand(0.5f, 1.8f)
             val roll = Random.nextFloat()
-            if (roll < 0.55f) {
+            if (state == STATE_WALK) {
+                if (roll < 0.7f) {
+                    lookTx = dir * 0.9f
+                    lookTy = 0f
+                } else {
+                    lookTx = 0f
+                    lookTy = 0.3f
+                }
+            } else if (roll < 0.7f) {
                 lookTx = 0f
                 lookTy = 0.3f
-            } else if (roll < 0.8f) {
+            } else if (roll < 0.85f) {
                 lookTx = dir * 0.9f
                 lookTy = 0f
             } else {
@@ -292,49 +354,126 @@ class FaceView(context: Context) : View(context) {
             }
         }
 
-        val r = min(width, height) / 2f
+        bobPx = bounce * r
         translationX = posX
-        translationY = -(bounce + hop) * r
-        rotation = tilt
+        translationY = -hop * r
+        rotation = tilt * 0.5f
+    }
+
+    // A limb with a dark outline and a yellow middle.
+    private fun drawLimb(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, w: Float) {
+        limbOutline.strokeWidth = w
+        limbFill.strokeWidth = w * 0.62f
+        canvas.drawLine(x0, y0, x1, y1, limbOutline)
+        canvas.drawLine(x0, y0, x1, y1, limbFill)
+    }
+
+    private fun drawBlob(canvas: Canvas, x: Float, y: Float, rad: Float) {
+        canvas.drawCircle(x, y, rad, blobFill)
+        blobRim.strokeWidth = rad * 0.35f
+        canvas.drawCircle(x, y, rad, blobRim)
+    }
+
+    private fun drawLegs(canvas: Canvas, cx: Float, cy: Float, hr: Float, r: Float) {
+        val hipY = cy + hr * 0.85f
+        val footBase = r * 1.2f + hr * 0.85f + r * 0.5f
+        val lw = r * 0.22f
+        for (side in 0..1) {
+            val s = if (side == 0) -1f else 1f
+            val hipX = cx + s * hr * 0.32f
+            val ph = if (side == 0) phase else phase + ONE_PI
+            var fx = hipX + sin(ph) * r * 0.3f * swing
+            var fy = footBase - max(0f, cos(ph)) * r * 0.12f * swing
+            if (state == STATE_TAP && side == 1) fy -= abs(sin(phase)) * r * 0.16f
+            // Sitting (crying): feet out to the sides.
+            fx += s * r * 0.3f * sit
+            fy -= r * 0.22f * sit
+            drawLimb(canvas, hipX, hipY, fx, fy, lw)
+            drawBlob(canvas, fx, fy, lw * 0.8f)
+        }
+    }
+
+    private fun drawArms(canvas: Canvas, cx: Float, cy: Float, hr: Float, r: Float) {
+        val aw = r * 0.2f
+        for (side in 0..1) {
+            val s = if (side == 0) -1f else 1f
+            val sx = cx + s * hr * 0.92f
+            val sy = cy + hr * 0.2f
+            val ph = if (side == 0) phase + ONE_PI else phase
+            var hx = sx + s * r * 0.28f + sin(ph) * r * 0.14f * swing
+            var hy = sy + r * 0.62f - max(0f, sin(ph)) * r * 0.1f * swing
+            if (side == 1 && wave > 0.01f) {
+                val wx = sx + r * 0.4f + sin(t * 14f) * r * 0.15f
+                val wy = sy - r * 0.55f
+                hx += (wx - hx) * wave
+                hy += (wy - hy) * wave
+            }
+            if (cheer > 0.01f) {
+                val chx = sx + s * r * 0.45f + sin(t * 18f + side) * r * 0.12f
+                val chy = sy - r * 0.7f
+                hx += (chx - hx) * cheer
+                hy += (chy - hy) * cheer
+            }
+            if (sit > 0.01f) {
+                // Crying: a hand comes up to rub the eye.
+                val shx = cx + s * hr * 0.5f
+                val shy = cy + hr * 0.02f + sin(t * 8f + side * 2f) * r * 0.05f
+                hx += (shx - hx) * sit
+                hy += (shy - hy) * sit
+            }
+            drawLimb(canvas, sx, sy, hx, hy, aw)
+            handX[side] = hx
+            handY[side] = hy
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val r = min(w, h) / 2f * 0.94f
-        val cx = w / 2f
-        val cy = h / 2f
+        val r = headPx / 2f
+        val cx = width / 2f
+        val cy = r * 1.2f - bobPx
+        val hr = r * 0.94f
 
-        outlinePaint.strokeWidth = r * 0.07f
-        canvas.drawCircle(cx, cy, r, facePaint)
-        canvas.drawCircle(cx, cy, r, outlinePaint)
+        drawLegs(canvas, cx, cy, hr, r)
+        drawArms(canvas, cx, cy, hr, r)
 
-        val er = r * 0.29f
-        val ey = cy - r * 0.12f
-        val exL = cx - r * 0.36f
-        val exR = cx + r * 0.36f
+        outlinePaint.strokeWidth = hr * 0.07f
+        canvas.drawCircle(cx, cy, hr, facePaint)
+        canvas.drawCircle(cx, cy, hr, outlinePaint)
+
+        // The face features slide a little in the walking direction, like a turned head.
+        val shift = turn * hr
+        val er = hr * 0.29f
+        val ey = cy - hr * 0.12f
+        val exL = cx - hr * 0.36f + shift
+        val exR = cx + hr * 0.36f + shift
         val hs = max(0.08f, eyeOpen * (1f - blink))
         drawEye(canvas, exL, ey, er, hs)
         drawEye(canvas, exR, ey, er, hs)
 
+        // Round glasses
+        glassesPaint.strokeWidth = hr * 0.07f
+        canvas.drawCircle(exL, ey, er * 1.12f, glassesPaint)
+        canvas.drawCircle(exR, ey, er * 1.12f, glassesPaint)
+        canvas.drawLine(exL + er * 1.12f, ey, exR - er * 1.12f, ey, glassesPaint)
+
         if (brow > 0.05f) {
-            linePaint.strokeWidth = r * 0.07f
+            linePaint.strokeWidth = hr * 0.07f
             linePaint.alpha = (brow * 255f).toInt().coerceIn(0, 255)
-            val yb = ey - er * 1.45f
+            val yb = ey - er * 1.5f
             canvas.drawLine(exL - er * 0.9f, yb + brow * er * 0.35f, exL + er * 0.8f, yb - brow * er * 0.45f, linePaint)
             canvas.drawLine(exR - er * 0.8f, yb - brow * er * 0.45f, exR + er * 0.9f, yb + brow * er * 0.35f, linePaint)
             linePaint.alpha = 255
         }
 
-        val my = cy + r * 0.45f
-        val mw = r * 0.34f
-        var ctrl = my + mouth * r * 0.5f
-        if (mood == 1) ctrl += sin(t * 10f) * r * 0.04f
-        linePaint.strokeWidth = r * 0.09f
+        val my = cy + hr * 0.45f
+        val mw = hr * 0.34f
+        var ctrl = my + mouth * hr * 0.5f
+        if (mood == 1) ctrl += sin(t * 10f) * hr * 0.04f
+        linePaint.strokeWidth = hr * 0.09f
         linePaint.alpha = 255
         tmpPath.reset()
-        tmpPath.moveTo(cx - mw, my)
-        tmpPath.quadTo(cx, ctrl, cx + mw, my)
+        tmpPath.moveTo(cx + shift - mw, my)
+        tmpPath.quadTo(cx + shift, ctrl, cx + shift + mw, my)
         canvas.drawPath(tmpPath, linePaint)
 
         if (tear > 0.02f) {
@@ -342,8 +481,13 @@ class FaceView(context: Context) : View(context) {
                 val tx = if (i == 0) exL else exR
                 val p = (t * 0.9f + i * 0.5f) % 1f
                 tearPaint.alpha = (tear * (1f - p) * 255f).toInt().coerceIn(0, 255)
-                canvas.drawCircle(tx, ey + er * 0.8f + p * r * 0.55f, r * 0.08f, tearPaint)
+                canvas.drawCircle(tx, ey + er * 0.8f + p * hr * 0.55f, hr * 0.08f, tearPaint)
             }
+        }
+
+        // Hands go on top so they can reach the face.
+        for (side in 0..1) {
+            drawBlob(canvas, handX[side], handY[side], r * 0.17f)
         }
     }
 

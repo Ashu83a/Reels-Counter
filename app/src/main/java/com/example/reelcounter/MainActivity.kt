@@ -2,24 +2,93 @@ package com.example.reelcounter
 
 import android.app.Activity
 import android.content.Intent
-import android.os.Build
+import android.content.res.ColorStateList
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.roundToInt
 
+// The settings screen. Every change is saved the moment it is made.
 class MainActivity : Activity() {
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var statusText: TextView? = null
+
+    private var relaxDays = ""
+    private var relaxStart = 18
+    private var relaxEnd = 22
+    private var bedTime1 = 22 * 60 + 30
+    private var bedTime2 = 23 * 60
+
+    private val statusRefresh = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            handler.postDelayed(this, 4000L)
+        }
+    }
+
+    // A slider with a minimum, a maximum and a step size.
+    private inner class Slider(
+        val min: Int, val max: Int, val step: Int,
+        val label: TextView, val seek: SeekBar, val fmt: (Int) -> String
+    ) {
+        fun value(): Int = min + seek.progress * step
+
+        fun set(v: Int) {
+            val p = ((v - min).toFloat() / step).roundToInt().coerceIn(0, (max - min) / step)
+            seek.progress = p
+            label.text = fmt(value())
+        }
+
+        fun snapUp(x: Int): Int {
+            val k = ceil((x - min).toFloat() / step).toInt().coerceIn(0, (max - min) / step)
+            return min + k * step
+        }
+
+        fun snapDown(x: Int): Int {
+            val k = floor((x - min).toFloat() / step).toInt().coerceIn(0, (max - min) / step)
+            return min + k * step
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Prefs.hasPassword(this)) showGate() else showSettings()
+        if (Prefs.hasPassword(this)) {
+            showGate()
+        } else {
+            showSettings()
+            if (!Prefs.getGuideDone(this)) {
+                startActivity(Intent(this, SetupGuideActivity::class.java))
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshStatus()
+        handler.postDelayed(statusRefresh, 4000L)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(statusRefresh)
+        super.onPause()
     }
 
     // ---- Password screen (only if a password was set) ----
@@ -36,7 +105,7 @@ class MainActivity : Activity() {
 
         val field = Theme.field(this, "", false)
         field.hint = "Password"
-        field.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        field.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         layout.addView(field, Theme.lp(this, 0f, 12f))
 
         val open = Theme.button(this, "Open")
@@ -51,32 +120,27 @@ class MainActivity : Activity() {
         setContentView(layout)
     }
 
+    // ---- Small building blocks ----
     private fun minutesToText(m: Int): String = String.format(Locale.US, "%02d:%02d", m / 60, m % 60)
 
-    private fun textToMinutes(t: String, fallback: Int): Int {
+    // Returns minutes after midnight, or -1 if the text is not a valid HH:MM time.
+    private fun textToMinutes(t: String): Int {
         val parts = t.trim().split(":")
-        if (parts.size != 2) return fallback
-        val h = parts[0].trim().toIntOrNull() ?: return fallback
-        val m = parts[1].trim().toIntOrNull() ?: return fallback
-        if (h < 0 || h > 23 || m < 0 || m > 59) return fallback
+        if (parts.size != 2) return -1
+        val h = parts[0].trim().toIntOrNull() ?: return -1
+        val m = parts[1].trim().toIntOrNull() ?: return -1
+        if (h < 0 || h > 23 || m < 0 || m > 59) return -1
         return h * 60 + m
     }
 
-    private fun num(e: EditText, fallback: Int): Int = e.text.toString().trim().toIntOrNull() ?: fallback
-
-    // A small label above a field.
-    private fun labelled(card: LinearLayout, label: String, field: EditText) {
-        card.addView(Theme.soft(this, label), Theme.lp(this, 10f, 3f))
-        card.addView(field, Theme.lp(this, 0f, 0f))
-    }
-
-    private fun switchRow(text: String, on: Boolean): Switch {
-        val s = Switch(this)
-        s.text = text
-        s.textSize = 15f
-        s.setTextColor(Theme.TEXT)
-        s.isChecked = on
-        return s
+    private fun onText(e: EditText, block: (String) -> Unit) {
+        e.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                block(s?.toString() ?: "")
+            }
+        })
     }
 
     private fun section(page: LinearLayout, title: String, note: String = ""): LinearLayout {
@@ -85,6 +149,120 @@ class MainActivity : Activity() {
         if (note.isNotEmpty()) card.addView(Theme.soft(this, note), Theme.lp(this, 4f, 0f))
         page.addView(card, Theme.lp(this, 0f, 14f))
         return card
+    }
+
+    // A title with a small "i" icon. Tapping the icon opens or closes a short explanation.
+    // Returns the text view on the right, where sliders show their value.
+    private fun header(card: LinearLayout, title: String, info: String): TextView {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.addView(
+            Theme.body(this, title, 15f),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val value = Theme.soft(this, "", 14f)
+        value.typeface = Theme.SERIF_BOLD
+        row.addView(value)
+
+        val icon = TextView(this)
+        icon.text = "i"
+        icon.textSize = 13f
+        icon.typeface = Theme.SERIF_BOLD
+        icon.gravity = Gravity.CENTER
+        icon.setTextColor(Theme.BRASS)
+        icon.background = Theme.rounded(Theme.CARD, Theme.dp(this, 12f).toFloat(), Theme.BRASS, Theme.dp(this, 1f))
+        val size = Theme.dp(this, 24f)
+        val iconLp = LinearLayout.LayoutParams(size, size)
+        iconLp.leftMargin = Theme.dp(this, 10f)
+        row.addView(icon, iconLp)
+        card.addView(row, Theme.lp(this, 14f, 0f))
+
+        val infoText = Theme.soft(this, info, 13f)
+        infoText.visibility = View.GONE
+        card.addView(infoText, Theme.lp(this, 4f, 0f))
+        icon.setOnClickListener {
+            infoText.visibility = if (infoText.visibility == View.GONE) View.VISIBLE else View.GONE
+        }
+        return value
+    }
+
+    private fun slider(
+        card: LinearLayout, title: String, info: String,
+        min: Int, max: Int, step: Int, current: Int,
+        fmt: (Int) -> String, onChange: (Int) -> Unit
+    ): Slider {
+        val label = header(card, title, info)
+        val seek = SeekBar(this)
+        seek.max = (max - min) / step
+        seek.progressTintList = ColorStateList.valueOf(Theme.GREEN)
+        seek.thumbTintList = ColorStateList.valueOf(Theme.GREEN)
+        card.addView(seek, Theme.lp(this, 4f, 0f))
+        val s = Slider(min, max, step, label, seek, fmt)
+        s.set(current)
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                label.text = fmt(s.value())
+                if (fromUser) onChange(s.value())
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        return s
+    }
+
+    private fun toggle(card: LinearLayout, title: String, info: String, on: Boolean, onChange: (Boolean) -> Unit): Switch {
+        header(card, title, info)
+        val s = Switch(this)
+        s.text = if (on) "On" else "Off"
+        s.textSize = 14f
+        s.setTextColor(Theme.TEXT)
+        s.isChecked = on
+        s.setOnCheckedChangeListener { _, checked ->
+            s.text = if (checked) "On" else "Off"
+            onChange(checked)
+        }
+        card.addView(s, Theme.lp(this, 4f, 0f))
+        return s
+    }
+
+    private fun textSetting(card: LinearLayout, title: String, info: String, value: String, onChange: (String) -> Unit): EditText {
+        header(card, title, info)
+        val e = Theme.field(this, value, false)
+        card.addView(e, Theme.lp(this, 4f, 0f))
+        onText(e, onChange)
+        return e
+    }
+
+    // Keeps the four limits in order (yellow, orange, red, lock) and saves them.
+    private fun enforceLimits(s: List<Slider>, changed: Int) {
+        val v = IntArray(4) { s[it].value() }
+        for (j in changed + 1 until 4) {
+            if (v[j] <= v[j - 1]) v[j] = s[j].snapUp(v[j - 1] + 1)
+        }
+        for (j in changed - 1 downTo 0) {
+            if (v[j] >= v[j + 1]) v[j] = s[j].snapDown(v[j + 1] - 1)
+        }
+        for (j in 0 until 4) {
+            if (v[j] != s[j].value()) s[j].set(v[j])
+        }
+        Prefs.setLimits(this, v[0], v[1], v[2])
+        Prefs.setLockLimit(this, v[3])
+    }
+
+    private fun refreshStatus() {
+        val view = statusText ?: return
+        val sb = StringBuilder()
+        sb.append("Counter service: ")
+            .append(if (SysCheck.accessibilityOn(this)) "on" else "OFF, turn it on in Accessibility").append('\n')
+        sb.append("Battery: ")
+            .append(if (SysCheck.batteryFree(this)) "unrestricted, good" else "the phone may put the counter to sleep").append('\n')
+        sb.append("Usage access: ")
+            .append(if (SysCheck.usageAccess(this)) "allowed" else "not allowed yet").append('\n')
+        val last = Prefs.getLastActive(this)
+        sb.append("Last reel seen: ").append(if (last == 0L) "never" else SysCheck.agoText(last))
+        view.text = sb.toString()
     }
 
     // ---- The settings screen ----
@@ -98,121 +276,119 @@ class MainActivity : Activity() {
         scroll.addView(page)
 
         page.addView(Theme.heading(this, "Reel Counter 4", 28f), Theme.lp(this, 8f, 2f))
-        page.addView(Theme.soft(this, "A calm way to keep an eye on short videos"), Theme.lp(this, 0f, 14f))
+        page.addView(Theme.soft(this, "A calm way to keep an eye on short videos. Changes are saved as you make them."), Theme.lp(this, 0f, 14f))
 
-        // ---- Setup ----
-        val setup = section(
-            page, "Setup",
-            "If the Accessibility switch is greyed out: Settings, Apps, Reel Counter 4, three dots, Allow restricted settings."
-        )
-        val btnAcc = Theme.button(this, "Turn the counter on (Accessibility)")
-        btnAcc.setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        setup.addView(btnAcc, Theme.lp(this, 10f, 0f))
-
-        val btnNote = Theme.softButton(this, "Allow notifications (for the bank reminder)")
-        btnNote.setOnClickListener {
-            if (Build.VERSION.SDK_INT >= 33) {
-                requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 100)
-            } else {
-                Toast.makeText(this, "Not needed on this Android version", Toast.LENGTH_SHORT).show()
-            }
-        }
-        setup.addView(btnNote, Theme.lp(this, 8f, 0f))
-
+        // ---- Status and shortcuts ----
+        val status = section(page, "Status")
+        val st = Theme.body(this, "", 14f)
+        statusText = st
+        status.addView(st, Theme.lp(this, 6f, 0f))
+        val btnGuide = Theme.button(this, "Setup guide")
+        btnGuide.setOnClickListener { startActivity(Intent(this, SetupGuideActivity::class.java)) }
+        status.addView(btnGuide, Theme.lp(this, 10f, 0f))
         val btnStats = Theme.softButton(this, "See my stats")
         btnStats.setOnClickListener { startActivity(Intent(this, StatsActivity::class.java)) }
-        setup.addView(btnStats, Theme.lp(this, 8f, 0f))
-
-        setup.addView(
+        status.addView(btnStats, Theme.lp(this, 8f, 0f))
+        val btnDiag = Theme.softButton(this, "What the counter sees (for fixing problems)")
+        btnDiag.setOnClickListener { startActivity(Intent(this, DiagnosticActivity::class.java)) }
+        status.addView(btnDiag, Theme.lp(this, 8f, 0f))
+        status.addView(
             Theme.soft(this, "Tip: in Settings, Accessibility, Advanced settings, you can set a shortcut (for example holding both volume keys) that turns this counter on or off in one gesture."),
             Theme.lp(this, 10f, 0f)
         )
 
         // ---- Limits ----
-        val limits = section(page, "Limits", "The bubble changes colour as the number of reels grows. At the last limit the lock screen appears.")
-        val f1 = Theme.field(this, Prefs.getLimit(this, 1).toString(), true)
-        val f2 = Theme.field(this, Prefs.getLimit(this, 2).toString(), true)
-        val f3 = Theme.field(this, Prefs.getLimit(this, 3).toString(), true)
-        val f4 = Theme.field(this, Prefs.getLimit(this, 4).toString(), true)
-        labelled(limits, "Yellow at (reels)", f1)
-        labelled(limits, "Orange at (reels)", f2)
-        labelled(limits, "Red at (reels)", f3)
-        labelled(limits, "Lock screen at (reels)", f4)
+        val limits = section(page, "Limits", "The bubble changes colour as the reels add up. At the last limit the lock screen appears.")
+        val ls = ArrayList<Slider>()
+        val reels = { v: Int -> "$v reels" }
+        ls.add(slider(limits, "Yellow limit", "The first warning. The bubble turns yellow, the face looks worried and you get the first buzz.", 25, 250, 25, Prefs.getLimit(this, 1), reels) { enforceLimits(ls, 0) })
+        ls.add(slider(limits, "Orange limit", "The second warning. The bubble turns orange and the buzz is longer.", 50, 500, 50, Prefs.getLimit(this, 2), reels) { enforceLimits(ls, 1) })
+        ls.add(slider(limits, "Red limit", "The third warning. The bubble turns red and the face looks sad.", 100, 750, 50, Prefs.getLimit(this, 3), reels) { enforceLimits(ls, 2) })
+        ls.add(slider(limits, "Lock screen at", "When the count reaches this number, the lock screen covers the app. The face cries.", 200, 1000, 100, Prefs.getLimit(this, 4), reels) { enforceLimits(ls, 3) })
+        enforceLimits(ls, 0)
 
         // ---- Vibration ----
-        val vibes = section(page, "Vibration", "Lengths are in milliseconds. 1000 is one second. 0 means no buzz.")
-        val v1 = Theme.field(this, TenthVibration.getLimitVibe(this, 1).toString(), true)
-        val v2 = Theme.field(this, TenthVibration.getLimitVibe(this, 2).toString(), true)
-        val v3 = Theme.field(this, TenthVibration.getLimitVibe(this, 3).toString(), true)
-        val iv = Theme.field(this, TenthVibration.getInterval(this).toString(), true)
-        val ivv = Theme.field(this, TenthVibration.getIntervalVibe(this).toString(), true)
-        labelled(vibes, "Buzz at the yellow limit", v1)
-        labelled(vibes, "Buzz at the orange limit", v2)
-        labelled(vibes, "Buzz at the red limit", v3)
-        labelled(vibes, "Short buzz and happy hop every how many reels", iv)
-        labelled(vibes, "Length of that short buzz", ivv)
+        val vibes = section(page, "Vibration", "How long the phone buzzes. 0 means no buzz.")
+        val secs = { v: Int -> String.format(Locale.US, "%.1f s", v / 1000f) }
+        val vs = ArrayList<Slider>()
+        val saveVibes = { _: Int -> TenthVibration.setLimitVibes(this, vs[0].value(), vs[1].value(), vs[2].value()) }
+        vs.add(slider(vibes, "Buzz at the yellow limit", "How long the phone buzzes when you reach the yellow limit.", 0, 5000, 100, TenthVibration.getLimitVibe(this, 1), secs, saveVibes))
+        vs.add(slider(vibes, "Buzz at the orange limit", "How long the phone buzzes at the orange limit.", 0, 5000, 100, TenthVibration.getLimitVibe(this, 2), secs, saveVibes))
+        vs.add(slider(vibes, "Buzz at the red limit", "How long the phone buzzes at the red limit.", 0, 5000, 100, TenthVibration.getLimitVibe(this, 3), secs, saveVibes))
+        slider(vibes, "Regular buzz every", "A short buzz and a happy hop of the face after this many reels. A gentle reminder that you are still scrolling.", 5, 50, 5, TenthVibration.getInterval(this), { v: Int -> "$v reels" }) { TenthVibration.setInterval(this, it) }
+        slider(vibes, "Length of the regular buzz", "How long the regular buzz lasts. 0 turns it off.", 0, 5000, 100, TenthVibration.getIntervalVibe(this), secs) { TenthVibration.setIntervalVibe(this, it) }
 
         // ---- Messages ----
-        val msgs = section(page, "Messages", "A short note shown when a limit is reached. Leave blank for none. The last one is shown on the lock screen.")
-        val m1 = Theme.field(this, Prefs.getMessage(this, 1), false)
-        val m2 = Theme.field(this, Prefs.getMessage(this, 2), false)
-        val m3 = Theme.field(this, Prefs.getMessage(this, 3), false)
-        val m4 = Theme.field(this, Prefs.getMessage(this, 4), false)
-        labelled(msgs, "At the yellow limit", m1)
-        labelled(msgs, "At the orange limit", m2)
-        labelled(msgs, "At the red limit", m3)
-        labelled(msgs, "On the lock screen", m4)
+        val msgs = section(page, "Messages", "A short note shown when a limit is reached. Leave blank for none.")
+        textSetting(msgs, "At the yellow limit", "Shown for a few seconds when you reach the yellow limit.", Prefs.getMessage(this, 1)) { Prefs.setMessage(this, 1, it) }
+        textSetting(msgs, "At the orange limit", "Shown when you reach the orange limit.", Prefs.getMessage(this, 2)) { Prefs.setMessage(this, 2, it) }
+        textSetting(msgs, "At the red limit", "Shown when you reach the red limit.", Prefs.getMessage(this, 3)) { Prefs.setMessage(this, 3, it) }
+        textSetting(msgs, "On the lock screen", "Shown on the lock screen, above a small suggestion like taking a walk.", Prefs.getMessage(this, 4)) { Prefs.setMessage(this, 4, it) }
 
         // ---- Unlock pauses ----
-        val pauses = section(page, "Unlock pauses", "How many times a day the lock screen can be paused for 15 minutes.")
-        val fp = Theme.field(this, Prefs.getMaxPauses(this).toString(), true)
-        labelled(pauses, "Pauses per day", fp)
+        val pauses = section(page, "Unlock pauses")
+        slider(pauses, "Pauses per day", "How many times a day you can pause the lock screen for 15 minutes. 0 means no pauses at all.", 0, 5, 1, Prefs.getMaxPauses(this), { v: Int -> "$v per day" }) { Prefs.setMaxPauses(this, it) }
 
         // ---- Relaxed time ----
         val relax = section(page, "Relaxed time", "During this window the lock screen stays off. The bubble still counts.")
-        val relaxSwitch = switchRow("Use a relaxed window", Prefs.getRelaxEnabled(this))
-        relax.addView(relaxSwitch, Theme.lp(this, 8f, 0f))
-        val rd = Theme.field(this, Prefs.getRelaxDays(this), false)
-        val rs = Theme.field(this, Prefs.getRelaxStartHour(this).toString(), true)
-        val re = Theme.field(this, Prefs.getRelaxEndHour(this).toString(), true)
-        labelled(relax, "Days (1 = Sunday, 2 = Monday ... 7 = Saturday, separated by commas)", rd)
-        labelled(relax, "From hour (0 to 23)", rs)
-        labelled(relax, "Until hour (0 to 23)", re)
+        relaxDays = Prefs.getRelaxDays(this)
+        relaxStart = Prefs.getRelaxStartHour(this)
+        relaxEnd = Prefs.getRelaxEndHour(this)
+        toggle(relax, "Use a relaxed window", "Turn on to let yourself scroll without the lock during chosen days and hours.", Prefs.getRelaxEnabled(this)) { Prefs.setRelaxEnabled(this, it) }
+        textSetting(relax, "Days", "Numbers separated by commas: 1 is Sunday, 2 Monday, 3 Tuesday, 4 Wednesday, 5 Thursday, 6 Friday, 7 Saturday.", relaxDays) {
+            relaxDays = it.trim()
+            Prefs.setRelaxWindow(this, relaxDays, relaxStart, relaxEnd)
+        }
+        slider(relax, "From hour", "The relaxed window starts at this hour of the day (24 hour clock).", 0, 23, 1, relaxStart, { v: Int -> String.format(Locale.US, "%02d:00", v) }) {
+            relaxStart = it
+            Prefs.setRelaxWindow(this, relaxDays, relaxStart, relaxEnd)
+        }
+        slider(relax, "Until hour", "The relaxed window ends at this hour of the day.", 0, 23, 1, relaxEnd, { v: Int -> String.format(Locale.US, "%02d:00", v) }) {
+            relaxEnd = it
+            Prefs.setRelaxWindow(this, relaxDays, relaxStart, relaxEnd)
+        }
 
         // ---- Bedtime ----
         val bed = section(page, "Bedtime", "Two gentle reminders at night, then the face keeps hopping every 15 minutes while you scroll.")
-        val bedSwitch = switchRow("Bedtime reminders", Prefs.getBedtimeEnabled(this))
-        bed.addView(bedSwitch, Theme.lp(this, 8f, 0f))
-        val bt1 = Theme.field(this, minutesToText(Prefs.getBedtime1(this)), false)
-        val bt2 = Theme.field(this, minutesToText(Prefs.getBedtime2(this)), false)
-        val bm1 = Theme.field(this, Prefs.getBedMessage(this, 1), false)
-        val bm2 = Theme.field(this, Prefs.getBedMessage(this, 2), false)
-        labelled(bed, "First reminder at (HH:MM, 24 hour)", bt1)
-        labelled(bed, "Second reminder at (HH:MM, 24 hour)", bt2)
-        labelled(bed, "First message", bm1)
-        labelled(bed, "Second message", bm2)
+        bedTime1 = Prefs.getBedtime1(this)
+        bedTime2 = Prefs.getBedtime2(this)
+        toggle(bed, "Bedtime reminders", "Turn on to get reminded to sleep when you are still scrolling late at night.", Prefs.getBedtimeEnabled(this)) { Prefs.setBedtimeEnabled(this, it) }
+        textSetting(bed, "First reminder at (HH:MM)", "The time of the first reminder, on a 24 hour clock, for example 22:30.", minutesToText(bedTime1)) {
+            val m = textToMinutes(it)
+            if (m >= 0) {
+                bedTime1 = m
+                Prefs.setBedtimes(this, bedTime1, bedTime2)
+            }
+        }
+        textSetting(bed, "Second reminder at (HH:MM)", "The time of the second reminder, for example 23:00.", minutesToText(bedTime2)) {
+            val m = textToMinutes(it)
+            if (m >= 0) {
+                bedTime2 = m
+                Prefs.setBedtimes(this, bedTime1, bedTime2)
+            }
+        }
+        textSetting(bed, "First message", "What the first reminder says.", Prefs.getBedMessage(this, 1)) { Prefs.setBedMessage(this, 1, it) }
+        textSetting(bed, "Second message", "What the second reminder says.", Prefs.getBedMessage(this, 2)) { Prefs.setBedMessage(this, 2, it) }
 
         // ---- Bank apps ----
         val bank = section(
             page, "Bank apps",
             "Banking apps refuse to work while an accessibility service is on. When one opens, the counter switches itself off and shows a notification. Tap it to turn the counter back on afterwards."
         )
-        val bankSwitch = switchRow("Switch off for bank apps", Prefs.getBankGuard(this))
-        bank.addView(bankSwitch, Theme.lp(this, 8f, 0f))
-        val bw = Theme.field(this, Prefs.getBankWords(this), false)
-        labelled(bank, "Words to look for in app names (separated by commas)", bw)
+        toggle(bank, "Switch off for bank apps", "When on, the counter switches itself off as soon as a bank or payment app opens.", Prefs.getBankGuard(this)) { Prefs.setBankGuard(this, it) }
+        textSetting(bank, "Words to look for in app names", "Any app whose technical name contains one of these words counts as a bank app. Separate the words with commas.", Prefs.getBankWords(this)) { Prefs.setBankWords(this, it) }
 
         // ---- Look ----
-        val look = section(page, "Look", "How see-through the bubble is. 0 is solid, 80 is very faint.")
-        val tr = Theme.field(this, Prefs.getTransparency(this).toString(), true)
-        labelled(look, "Transparency (0 to 80)", tr)
+        val look = section(page, "Look")
+        slider(look, "Bubble transparency", "How see-through the bubble is. 0% is solid, 80% is very faint.", 0, 80, 5, Prefs.getTransparency(this), { v: Int -> "$v%" }) { Prefs.setTransparency(this, it) }
 
         // ---- Password ----
         val pw = section(page, "Password", "Optional. A friend can set it so these settings cannot be changed on impulse.")
+        header(pw, "Password", "When set, the settings ask for it every time the app opens. Remove it here if you no longer want it.")
         val pwField = Theme.field(this, "", false)
         pwField.hint = if (Prefs.hasPassword(this)) "New password" else "Choose a password"
-        pwField.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        labelled(pw, "Password", pwField)
+        pwField.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        pw.addView(pwField, Theme.lp(this, 4f, 0f))
         val pwSet = Theme.softButton(this, "Set password")
         pwSet.setOnClickListener {
             val text = pwField.text.toString()
@@ -234,44 +410,8 @@ class MainActivity : Activity() {
             pw.addView(pwClear, Theme.lp(this, 8f, 0f))
         }
 
-        // ---- Save ----
-        val save = Theme.button(this, "Save settings")
-        save.setOnClickListener {
-            val l1 = num(f1, 100)
-            val l2 = num(f2, 150)
-            val l3 = num(f3, 200)
-            val l4 = num(f4, 300)
-            if (l1 <= 0 || l2 <= l1 || l3 <= l2 || l4 <= l3) {
-                Toast.makeText(this, "Limits must go up: yellow, then orange, then red, then lock", Toast.LENGTH_LONG).show()
-            } else {
-                Prefs.setLimits(this, l1, l2, l3)
-                Prefs.setLockLimit(this, l4)
-                TenthVibration.setLimitVibes(this, num(v1, 1000), num(v2, 3000), num(v3, 5000))
-                TenthVibration.setInterval(this, num(iv, 10).coerceAtLeast(1))
-                TenthVibration.setIntervalVibe(this, num(ivv, 300))
-                Prefs.setMessage(this, 1, m1.text.toString())
-                Prefs.setMessage(this, 2, m2.text.toString())
-                Prefs.setMessage(this, 3, m3.text.toString())
-                Prefs.setMessage(this, 4, m4.text.toString())
-                Prefs.setMaxPauses(this, num(fp, 2))
-                Prefs.setRelaxEnabled(this, relaxSwitch.isChecked)
-                Prefs.setRelaxWindow(this, rd.text.toString().trim(), num(rs, 18).coerceIn(0, 23), num(re, 22).coerceIn(0, 23))
-                Prefs.setBedtimeEnabled(this, bedSwitch.isChecked)
-                Prefs.setBedtimes(
-                    this,
-                    textToMinutes(bt1.text.toString(), Prefs.getBedtime1(this)),
-                    textToMinutes(bt2.text.toString(), Prefs.getBedtime2(this))
-                )
-                Prefs.setBedMessage(this, 1, bm1.text.toString())
-                Prefs.setBedMessage(this, 2, bm2.text.toString())
-                Prefs.setBankGuard(this, bankSwitch.isChecked)
-                Prefs.setBankWords(this, bw.text.toString())
-                Prefs.setTransparency(this, num(tr, 20).coerceIn(0, 80))
-                Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
-            }
-        }
-        page.addView(save, Theme.lp(this, 4f, 28f))
-
+        page.addView(View(this), Theme.lp(this, 0f, 24f))
         setContentView(scroll)
+        refreshStatus()
     }
 }

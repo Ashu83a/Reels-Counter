@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
@@ -23,6 +24,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -63,6 +65,9 @@ class ReelService : AccessibilityService() {
     private var lastEvalTime = 0L
     private var lastKeep = false
     private var rootMisses = 0
+    private var lastSnapshot = 0L
+    private val rect = Rect()
+    private var screenH = 2000
     private var activeKind = KIND_NONE
     private var activeApp = ""
     private var lastCheckTime = 0L
@@ -145,7 +150,7 @@ class ReelService : AccessibilityService() {
         }
 
         if (eventPkg !in reelApps && !watching) return
-        val keep = evaluate(true)
+        val keep = evaluate(event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
         if (keep) {
             startWatching()
         } else if (watching) {
@@ -198,13 +203,18 @@ class ReelService : AccessibilityService() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isInteractive) return finish(false)
 
-        val root = rootInActiveWindow
+        var root: AccessibilityNodeInfo? = rootInActiveWindow
+        if (root == null) root = findAppWindowRoot()
         if (root == null) {
             rootMisses++
             return finish(rootMisses < 3)
         }
         rootMisses = 0
         val pkg = root.packageName?.toString() ?: return finish(false)
+        if (now - lastSnapshot > 600000L) {
+            lastSnapshot = now
+            UsageHelper.snapshot(this)
+        }
 
         if (Prefs.isBankPackage(this, pkg)) {
             pauseForBank()
@@ -213,18 +223,19 @@ class ReelService : AccessibilityService() {
         if (pkg !in reelApps) return finish(false)
 
         val app = appKey(pkg)
+        screenH = resources.displayMetrics.heightPixels
         val info = ScreenInfo()
         walk(root, info, 0, IntArray(1))
 
         var kind = KIND_NONE
         if (isReelScreen(pkg, root, info, now)) {
             kind = KIND_REEL
-        } else if (isLongScreen(pkg, root, info)) {
-            kind = KIND_LONG
         }
         activeKind = kind
         activeApp = app
         lastCheckTime = now
+        Diag.update(pkg, kind, info.ids, info.selectedIds, info.items, info.hasPager, now < fallbackUntil)
+        if (kind == KIND_REEL) Prefs.setLastActive(this, now)
 
         if (kind == KIND_NONE) {
             hideBubble()
@@ -251,6 +262,7 @@ class ReelService : AccessibilityService() {
             lastSigItems = HashSet(items)
             lastCountTime = now
             val total = Prefs.addReel(this, app)
+            Diag.counted = Diag.counted + 1
             onNewReel(total)
         }
         refreshBubble()
@@ -270,13 +282,36 @@ class ReelService : AccessibilityService() {
         }
         val cls = node.className?.toString()
         if (cls != null && cls.contains("Pager") && node.isScrollable) info.hasPager = true
-        val d = node.contentDescription?.toString()
-        if (!d.isNullOrEmpty() && d.length > 12 && info.items.size < 12) info.items.add(d.take(40))
-        val t = node.text?.toString()
-        if (!t.isNullOrEmpty() && t.length > 12 && info.items.size < 12) info.items.add(t.take(40))
+        if (info.items.size < 30 && node.isVisibleToUser) {
+            node.getBoundsInScreen(rect)
+            val mid = (rect.top + rect.bottom) / 2
+            if (mid > screenH * 0.12f && mid < screenH * 0.82f) {
+                val d = node.contentDescription?.toString()
+                if (d != null && usable(d)) info.items.add(d.take(40))
+                val t = node.text?.toString()
+                if (t != null && usable(t)) info.items.add(t.take(40))
+            }
+        }
         for (i in 0 until node.childCount) {
             walk(node.getChild(i), info, depth + 1, count)
         }
+    }
+
+    // Text that can tell one reel from the next: long enough and containing letters.
+    private fun usable(text: String): Boolean = text.length >= 6 && text.any { it.isLetter() }
+
+    // Some phones give no active window; look through all windows for the app instead.
+    private fun findAppWindowRoot(): AccessibilityNodeInfo? {
+        try {
+            for (w in windows) {
+                if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val r = w.root ?: continue
+                val p = r.packageName?.toString() ?: continue
+                if (p in reelApps) return r
+            }
+        } catch (e: Exception) {
+        }
+        return null
     }
 
     private fun hasAnyId(info: ScreenInfo, parts: List<String>): Boolean {
@@ -514,7 +549,7 @@ class ReelService : AccessibilityService() {
         pill.background = bg
         pill.minimumWidth = Theme.dp(this, PILL_W_DP)
         pill.setPadding(
-            Theme.dp(this, 10f), half + Theme.dp(this, 3f),
+            Theme.dp(this, 10f), (faceSize * 0.65f).toInt() + Theme.dp(this, 3f),
             Theme.dp(this, 10f), Theme.dp(this, 5f)
         )
         pill.addView(count)
@@ -524,12 +559,12 @@ class ReelService : AccessibilityService() {
         root.clipChildren = false
 
         val pillLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        pillLp.topMargin = headroom + half
+        pillLp.topMargin = headroom + (faceSize * 0.6f).toInt()
         pillLp.gravity = Gravity.CENTER_HORIZONTAL
         root.addView(pill, pillLp)
 
-        val faceView = FaceView(this)
-        val faceLp = FrameLayout.LayoutParams(faceSize, faceSize)
+        val faceView = FaceView(this, faceSize)
+        val faceLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         faceLp.topMargin = headroom
         faceLp.gravity = Gravity.CENTER_HORIZONTAL
         root.addView(faceView, faceLp)

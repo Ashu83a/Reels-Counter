@@ -205,6 +205,30 @@ object Prefs {
         p(c).edit().putLong("last_big_bubble", t).apply()
     }
 
+    // ---- Total time each app was open, copied from the phone's usage data ----
+    fun getUsageSeconds(c: Context, app: String, day: String = dayString()): Int =
+        p(c).getInt("use_${app}_$day", 0)
+
+    // Only ever goes up, so a later partial reading never lowers a saved day.
+    fun setUsageSeconds(c: Context, app: String, day: String, secs: Int) {
+        if (secs > getUsageSeconds(c, app, day)) {
+            p(c).edit().putInt("use_${app}_$day", secs).apply()
+        }
+    }
+
+    fun sumAppUsage(c: Context, app: String, days: Int): Int = sumOver(days) { getUsageSeconds(c, app, it) }
+
+    // ---- Status line and first-run guide ----
+    fun getLastActive(c: Context): Long = p(c).getLong("last_active", 0L)
+    fun setLastActive(c: Context, t: Long) {
+        p(c).edit().putLong("last_active", t).apply()
+    }
+
+    fun getGuideDone(c: Context): Boolean = p(c).getBoolean("guide_done", false)
+    fun setGuideDone(c: Context, done: Boolean) {
+        p(c).edit().putBoolean("guide_done", done).apply()
+    }
+
     // ---- Bank apps: the counter switches itself off when one opens ----
     fun getBankGuard(c: Context): Boolean = p(c).getBoolean("bank_guard", true)
     fun setBankGuard(c: Context, on: Boolean) {
@@ -272,7 +296,7 @@ object Prefs {
         val sb = StringBuilder()
         sb.append("date,reels,seconds")
         for (app in APPS) {
-            sb.append(',').append(app).append("_reels,").append(app).append("_seconds")
+            sb.append(',').append(app).append("_reels,").append(app).append("_reel_seconds,").append(app).append("_app_seconds")
         }
         sb.append('\n')
         for (d in days) {
@@ -282,6 +306,7 @@ object Prefs {
             for (app in APPS) {
                 sb.append(',').append(getAppCount(c, app, d))
                 sb.append(',').append(getAppSeconds(c, app, d))
+                sb.append(',').append(getUsageSeconds(c, app, d))
             }
             sb.append('\n')
         }

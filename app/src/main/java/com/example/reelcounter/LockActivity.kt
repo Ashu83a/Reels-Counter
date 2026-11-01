@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
+import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -28,11 +29,10 @@ class LockActivity : Activity() {
         layout.setBackgroundColor(Theme.BURGUNDY)
 
         // A big crying face.
-        val face = FaceView(this)
+        val face = FaceView(this, Theme.dp(this, 110f))
         face.setMood(3)
         face.setTravel(0f)
-        val size = Theme.dp(this, 130f)
-        layout.addView(face, LinearLayout.LayoutParams(size, size))
+        layout.addView(face, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val total = Prefs.getCount(this)
         val title = TextView(this)
