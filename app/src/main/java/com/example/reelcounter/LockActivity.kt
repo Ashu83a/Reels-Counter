@@ -29,9 +29,8 @@ class LockActivity : Activity() {
         layout.setBackgroundColor(Theme.BURGUNDY)
 
         // A big crying face.
-        val face = FaceView(this, Theme.dp(this, 110f))
-        face.setMood(3)
-        face.setTravel(0f)
+        val face = BuddyView(this, Theme.dp(this, 170f))
+        face.setExpression(BuddyView.SAD)
         layout.addView(face, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val total = Prefs.getCount(this)

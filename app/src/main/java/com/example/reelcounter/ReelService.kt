@@ -37,11 +37,10 @@ class ReelService : AccessibilityService() {
     private companion object {
         const val KIND_NONE = 0
         const val KIND_REEL = 1
-        const val KIND_LONG = 2
         const val POLL_MS = 1500L
         const val CHANNEL = "bank_pause"
         const val NOTE_ID = 1
-        const val FACE_DP = 22f
+        const val BUDDY_DP = 60f
         const val PILL_W_DP = 78f
         const val TOP_Y_DP = 22f
     }
@@ -49,12 +48,14 @@ class ReelService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var windowManager: WindowManager? = null
 
-    // The bubble: a pill with a face sitting on its top edge.
+    // The bubble: a pill with Brain Buddy standing on its top edge.
     private var bubbleRoot: FrameLayout? = null
     private var pillBg: GradientDrawable? = null
     private var countText: TextView? = null
     private var timerText: TextView? = null
-    private var face: FaceView? = null
+    private var face: BuddyView? = null
+    private var overrideExpr = -1
+    private var overrideUntil = 0L
     private var shownColor = 0
     private var targetColor = 0
     private var colorAnim: ValueAnimator? = null
@@ -75,8 +76,6 @@ class ReelService : AccessibilityService() {
     // Reel counting
     private var lastSigItems: Set<String> = emptySet()
     private var lastCountTime = 0L
-    private var lastLongSignature = ""
-    private var lastLongCountTime = 0L
 
     // Fallback for screens we do not recognise: several full-screen swipes in a row.
     private var fallbackItems: Set<String> = emptySet()
@@ -96,7 +95,6 @@ class ReelService : AccessibilityService() {
 
     private val igReelIds = listOf("clips_viewer", "clips_video_container", "clips_swipe_refresh")
     private val ytShortIds = listOf("reel_player", "reel_recycler", "reel_watch", "shorts_player")
-    private val ytLongIds = listOf("watch_player", "player_view", "watch_while_time_bar")
 
     private class ScreenInfo {
         val ids = HashSet<String>()
@@ -124,8 +122,6 @@ class ReelService : AccessibilityService() {
             if (fresh && activeKind == KIND_REEL) {
                 Prefs.addSeconds(this@ReelService, activeApp, 1)
                 updateTimerText()
-            } else if (fresh && activeKind == KIND_LONG) {
-                Prefs.addLongSeconds(this@ReelService, activeApp, 1)
             }
             handler.postDelayed(this, 1000L)
         }
@@ -242,17 +238,6 @@ class ReelService : AccessibilityService() {
             return finish(true)
         }
 
-        if (kind == KIND_LONG) {
-            hideBubble()
-            val signature = info.items.joinToString("|").take(300)
-            if (signature.isNotEmpty() && signature != lastLongSignature && now - lastLongCountTime > 60000L) {
-                lastLongSignature = signature
-                lastLongCountTime = now
-                Prefs.addLongVideo(this, app)
-            }
-            return finish(true)
-        }
-
         // A reel screen: show the bubble and count a new reel when the screen content changes.
         showBubble()
         val items = info.items
@@ -364,16 +349,6 @@ class ReelService : AccessibilityService() {
         return now < fallbackUntil
     }
 
-    // ---- Best-guess detection of a long video screen (YouTube and Facebook only) ----
-    private fun isLongScreen(pkg: String, root: AccessibilityNodeInfo, info: ScreenInfo): Boolean {
-        return when (pkg) {
-            "com.google.android.youtube" -> hasAnyId(info, ytLongIds)
-            "com.facebook.katana", "com.facebook.lite" ->
-                findTextContains(root, "Seek bar") || findTextContains(root, "Video player")
-            else -> false
-        }
-    }
-
     // ---- What happens on each new reel ----
     private fun onNewReel(total: Int) {
         val l1 = Prefs.getLimit(this, 1)
@@ -396,8 +371,13 @@ class ReelService : AccessibilityService() {
             vibrate(intervalBuzz.toLong())
         }
 
-        // Milestones: the face hops and the pill glows. The size never changes.
+        // Milestones: Brain Buddy hops and the pill glows. The size never changes.
         if (total % 50 == 0 || total % interval == 0 || limitBuzz) {
+            if (total % 50 == 0) {
+                showMoment(BuddyView.EXCITED, 2500L)
+            } else if (!limitBuzz) {
+                showMoment(BuddyView.ENCOURAGING, 1800L)
+            }
             celebrate()
         }
 
@@ -460,6 +440,7 @@ class ReelService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (minutes >= t1 && now - Prefs.getLastBigBubble(this) > 15 * 60 * 1000L) {
             Prefs.setLastBigBubble(this, now)
+            showMoment(BuddyView.SLEEPY, 5000L)
             for (i in 0 until 5) {
                 handler.postDelayed({ celebrate() }, i * 1000L)
             }
@@ -510,21 +491,36 @@ class ReelService : AccessibilityService() {
         }
     }
 
-    // 0 happy, 1 worried, 2 sad, 3 crying
-    private fun moodFor(total: Int): Int {
-        return when {
-            total >= Prefs.getLimit(this, 4) -> 3
-            total >= Prefs.getLimit(this, 3) -> 2
-            total >= Prefs.getLimit(this, 1) -> 1
-            else -> 0
-        }
+    // Which Brain Buddy picture to show: the limit decides, a short moment can override it.
+    private fun expressionFor(total: Int): Int {
+        val now = System.currentTimeMillis()
+        if (overrideExpr >= 0 && now < overrideUntil) return overrideExpr
+        if (total >= Prefs.getLimit(this, 4)) return BuddyView.SAD
+        if (total >= Prefs.getLimit(this, 3)) return BuddyView.WORRIED
+        if (total >= Prefs.getLimit(this, 2)) return BuddyView.CONCERNED
+        if (total >= Prefs.getLimit(this, 1)) return BuddyView.CURIOUS
+        if (Prefs.isPaused(this) || Prefs.isRelaxedNow(this)) return BuddyView.RELAXED
+        return BuddyView.HAPPY
+    }
+
+    // Show a different picture for a few seconds, then go back to the limit's picture.
+    private fun showMoment(expr: Int, millis: Long) {
+        overrideExpr = expr
+        overrideUntil = System.currentTimeMillis() + millis
+        face?.setExpression(expr)
+        handler.postDelayed({
+            if (System.currentTimeMillis() >= overrideUntil) {
+                overrideExpr = -1
+                face?.setExpression(expressionFor(Prefs.getCount(this)))
+            }
+        }, millis + 100L)
     }
 
     private fun showBubble() {
         if (bubbleRoot != null) return
-        val faceSize = Theme.dp(this, FACE_DP)
-        val half = faceSize / 2
-        val headroom = (faceSize * 0.35f).toInt()
+        val buddySize = Theme.dp(this, BUDDY_DP)
+        // The character's feet stand on the pill edge, so only a little of it overlaps the pill.
+        val overlap = (buddySize * 0.16f).toInt()
 
         val bg = GradientDrawable()
         bg.shape = GradientDrawable.RECTANGLE
@@ -549,8 +545,8 @@ class ReelService : AccessibilityService() {
         pill.background = bg
         pill.minimumWidth = Theme.dp(this, PILL_W_DP)
         pill.setPadding(
-            Theme.dp(this, 10f), (faceSize * 0.65f).toInt() + Theme.dp(this, 3f),
-            Theme.dp(this, 10f), Theme.dp(this, 5f)
+            Theme.dp(this, 10f), Theme.dp(this, 9f),
+            Theme.dp(this, 10f), Theme.dp(this, 6f)
         )
         pill.addView(count)
         pill.addView(timer)
@@ -559,21 +555,15 @@ class ReelService : AccessibilityService() {
         root.clipChildren = false
 
         val pillLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        pillLp.topMargin = headroom + (faceSize * 0.6f).toInt()
+        pillLp.topMargin = buddySize - overlap
         pillLp.gravity = Gravity.CENTER_HORIZONTAL
         root.addView(pill, pillLp)
 
-        val faceView = FaceView(this, faceSize)
+        val faceView = BuddyView(this, buddySize)
         val faceLp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        faceLp.topMargin = headroom
+        faceLp.topMargin = 0
         faceLp.gravity = Gravity.CENTER_HORIZONTAL
         root.addView(faceView, faceLp)
-
-        // The face may float along the pill, so it needs to know how wide the pill is.
-        val margin = Theme.dp(this, 8f)
-        pill.addOnLayoutChangeListener { _, l, _, r, _, _, _, _, _ ->
-            faceView.setTravel((r - l - faceSize - margin).toFloat())
-        }
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -612,7 +602,7 @@ class ReelService : AccessibilityService() {
         val total = Prefs.getCount(this)
         countText?.text = total.toString()
         updateTimerText()
-        face?.setMood(moodFor(total))
+        face?.setExpression(expressionFor(total))
         fadeColorTo(colorFor(total))
         // Transparency setting: 0 is solid, 80 is very faint.
         val alpha = ((100 - Prefs.getTransparency(this)) * 255) / 100

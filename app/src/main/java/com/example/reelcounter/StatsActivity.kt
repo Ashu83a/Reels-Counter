@@ -319,8 +319,18 @@ class StatsActivity : Activity() {
         periodsBox.removeAllViews()
 
         val streakCard = Theme.card(this)
-        streakCard.addView(Theme.heading(this, "Streak", 18f))
         val streak = Prefs.currentStreak(this)
+        val streakHead = LinearLayout(this)
+        streakHead.orientation = LinearLayout.HORIZONTAL
+        streakHead.gravity = Gravity.CENTER_VERTICAL
+        streakHead.addView(
+            Theme.heading(this, "Streak", 18f),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val buddy = BuddyView(this, Theme.dp(this, 64f))
+        buddy.setExpression(if (streak >= 3) BuddyView.PROUD else BuddyView.HAPPY)
+        streakHead.addView(buddy)
+        streakCard.addView(streakHead)
         val text = if (streak == 0) {
             "No streak yet. A good day is a day under your first limit."
         } else {

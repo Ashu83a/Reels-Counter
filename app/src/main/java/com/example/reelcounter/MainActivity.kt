@@ -78,10 +78,21 @@ class MainActivity : Activity() {
                 startActivity(Intent(this, SetupGuideActivity::class.java))
             }
         }
+        applyWatcher()
+    }
+
+    // Starts or stops the restart prompt according to its setting.
+    private fun applyWatcher() {
+        if (Prefs.getWatcherOn(this) && SysCheck.usageAccess(this)) {
+            WatcherService.start(this)
+        } else if (!Prefs.getWatcherOn(this)) {
+            WatcherService.stop(this)
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        applyWatcher()
         refreshStatus()
         handler.postDelayed(statusRefresh, 4000L)
     }
@@ -260,6 +271,8 @@ class MainActivity : Activity() {
             .append(if (SysCheck.batteryFree(this)) "unrestricted, good" else "the phone may put the counter to sleep").append('\n')
         sb.append("Usage access: ")
             .append(if (SysCheck.usageAccess(this)) "allowed" else "not allowed yet").append('\n')
+        sb.append("Restart prompt: ")
+            .append(if (!Prefs.getWatcherOn(this)) "off" else if (SysCheck.usageAccess(this)) "on" else "needs usage access").append('\n')
         val last = Prefs.getLastActive(this)
         sb.append("Last reel seen: ").append(if (last == 0L) "never" else SysCheck.agoText(last))
         view.text = sb.toString()
@@ -369,6 +382,16 @@ class MainActivity : Activity() {
         }
         textSetting(bed, "First message", "What the first reminder says.", Prefs.getBedMessage(this, 1)) { Prefs.setBedMessage(this, 1, it) }
         textSetting(bed, "Second message", "What the second reminder says.", Prefs.getBedMessage(this, 2)) { Prefs.setBedMessage(this, 2, it) }
+
+        // ---- Restart prompt ----
+        val restart = section(
+            page, "Restart prompt",
+            "Android does not let an app switch its own accessibility service on. So this small helper watches for social apps, and if the counter is off it shows a notification. Tap it to switch the counter back on."
+        )
+        toggle(restart, "Remind me when the counter is off", "When on, opening Instagram, YouTube, Facebook, Threads or LinkedIn while the counter is off shows a notification that takes you to the right switch. It needs Usage access and shows a small quiet notification while it runs.", Prefs.getWatcherOn(this)) {
+            Prefs.setWatcherOn(this, it)
+            applyWatcher()
+        }
 
         // ---- Bank apps ----
         val bank = section(

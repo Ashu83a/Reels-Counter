@@ -90,6 +90,21 @@ class SetupGuideActivity : Activity() {
         )
         steps.add(
             Step(
+                "Restart prompt",
+                "Banks make the counter switch itself off. This helper notices when you open a social app and the counter is off, and shows a notification you tap to switch it back on. It needs usage access (the step above) and the notification step.",
+                "Start the restart prompt",
+                { Prefs.getWatcherOn(this) && SysCheck.usageAccess(this) }
+            ) {
+                Prefs.setWatcherOn(this, true)
+                if (SysCheck.usageAccess(this)) {
+                    WatcherService.start(this)
+                } else {
+                    startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                }
+            }
+        )
+        steps.add(
+            Step(
                 "Display over other apps",
                 "Only needed if the bubble does not show on your phone even though the counter is on. Most phones do not need it.",
                 "Open the setting",
