@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#E61F4D3A"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="8dp">
+
+    <ImageView
+        android:id="@+id/widget_buddy"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:contentDescription="Brain Buddy"
+        android:scaleType="fitCenter" />
+
+    <TextView
+        android:id="@+id/widget_text"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:gravity="center"
+        android:text="Reel Counter"
+        android:textColor="#F4EEDD"
+        android:textSize="16sp" />
+</LinearLayout>
