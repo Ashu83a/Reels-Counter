@@ -121,7 +121,9 @@ class SetupGuideActivity : Activity() {
                 true
             ) {
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-            },
+            }
+        )
+        steps.add(
             Step(
                 "Add the Kids mode tile",
                 "When a child grabs the phone, one tap on this tile switches Kids mode on. Swipe down twice from the top of the screen, tap the pencil or plus, find Kids mode, and drag it into your quick panel. Turning it off asks for the parent PIN.",
